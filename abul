@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# ABUL - Android Build System
+# Main entry point for the plugin-based build framework
+
+set -euo pipefail
+shopt -s extglob
+
+# Determine script directory
+ABUL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export ABUL_ROOT
+
+# Load core libraries
+source "${ABUL_ROOT}/lib/common.sh"
+source "${ABUL_ROOT}/lib/logging.sh"
+source "${ABUL_ROOT}/lib/download.sh"
+source "${ABUL_ROOT}/lib/extract.sh"
+source "${ABUL_ROOT}/lib/environment.sh"
+source "${ABUL_ROOT}/lib/toolchain.sh"
+source "${ABUL_ROOT}/lib/plugin_base.sh"
+
+# Default configuration
+ABUL_WORKSPACE="${ABUL_WORKSPACE:-${HOME}/abul-workspace}"
+ABUL_BUILD_THREADS="${ABUL_BUILD_THREADS:-$(nproc)}"
+
+# Initialize workspace
+abul::common::init_workspace
+
+# Parse command line
+show_usage() {
+  cat <<EOF
+ABUL - Android Build System
+
+Usage: abul [OPTIONS] <plugin> [plugin-args...]
+
+Options:
+  -h, --help              Show this help message
+  -v, --verbose           Enable verbose logging
+  -w, --workspace DIR     Set workspace directory (default: ${ABUL_WORKSPACE})
+  -j, --jobs N            Number of parallel jobs (default: ${ABUL_BUILD_THREADS})
+  --list-plugins          List available plugins
+  --env KEY=VALUE         Set custom environment variable
+
+Plugins:
+EOF
+  
+  # List available plugins
+  local plugins_dir="${ABUL_ROOT}/plugins"
+  if [ -d "$plugins_dir" ]; then
+    for plugin_file in "$plugins_dir"/*.sh; do
+      if [ -f "$plugin_file" ]; then
+        local plugin_name="$(basename "$plugin_file" .sh)"
+        echo "  - ${plugin_name}"
+      fi
+    done
+  fi
+  
+  cat <<EOF
+
+Examples:
+  abul python 3.13.9
+  abul --workspace /tmp/builds python 3.13.9
+  abul --env CUSTOM_VAR=value python 3.13.9
+  abul --list-plugins
+
+For plugin-specific help:
+  abul <plugin> --help
+
+EOF
+}
+
+list_plugins() {
+  local plugins_dir="${ABUL_ROOT}/plugins"
+  abul::log::info "Available plugins:"
+  
+  if [ ! -d "$plugins_dir" ]; then
+    abul::log::warn "No plugins directory found at $plugins_dir"
+    return 0
+  fi
+  
+  for plugin_file in "$plugins_dir"/*.sh; do
+    if [ -f "$plugin_file" ]; then
+      local plugin_name="$(basename "$plugin_file" .sh)"
+      
+      # Try to load plugin and get description
+      source "$plugin_file" || continue
+      
+      if declare -f "plugin::${plugin_name}::describe" >/dev/null 2>&1; then
+        local desc="$(plugin::${plugin_name}::describe)"
+        printf "  %-20s %s\n" "${plugin_name}" "$desc"
+      else
+        printf "  %-20s %s\n" "${plugin_name}" "(no description)"
+      fi
+    fi
+  done
+}
+
+# Parse arguments
+CUSTOM_ENV_VARS=()
+PLUGIN_NAME=""
+PLUGIN_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      # Check if plugin is specified for plugin-specific help
+      if [ -n "${2:-}" ] && [ "${2:0:1}" != "-" ]; then
+        PLUGIN_NAME="$2"
+        shift 2
+        # Set --help as plugin argument
+        PLUGIN_ARGS=("--help")
+        break
+      else
+        show_usage
+        exit 0
+      fi
+      ;;
+    -v|--verbose)
+      export ABUL_VERBOSE=1
+      shift
+      ;;
+    -w|--workspace)
+      if [ -z "${2:-}" ]; then
+        abul::log::fatal "Option --workspace requires an argument"
+      fi
+      ABUL_WORKSPACE="$2"
+      shift 2
+      ;;
+    -j|--jobs)
+      if [ -z "${2:-}" ]; then
+        abul::log::fatal "Option --jobs requires an argument"
+      fi
+      ABUL_BUILD_THREADS="$2"
+      shift 2
+      ;;
+    --env)
+      if [ -z "${2:-}" ]; then
+        abul::log::fatal "Option --env requires an argument (KEY=VALUE)"
+      fi
+      CUSTOM_ENV_VARS+=("$2")
+      shift 2
+      ;;
+    --list-plugins)
+      list_plugins
+      exit 0
+      ;;
+    -*)
+      abul::log::fatal "Unknown option: $1"
+      ;;
+    *)
+      # First non-option argument is the plugin name
+      if [ -z "$PLUGIN_NAME" ]; then
+        PLUGIN_NAME="$1"
+        shift
+      else
+        # Remaining arguments are for the plugin
+        PLUGIN_ARGS+=("$1")
+        shift
+      fi
+      ;;
+  esac
+done
+
+# Apply custom environment variables
+for env_var in "${CUSTOM_ENV_VARS[@]}"; do
+  if [[ "$env_var" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+    export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+    abul::log::debug "Set custom env: ${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+  else
+    abul::log::warn "Invalid environment variable format: $env_var (expected KEY=VALUE)"
+  fi
+done
+
+# Validate plugin name
+if [ -z "$PLUGIN_NAME" ]; then
+  abul::log::error "No plugin specified"
+  echo
+  show_usage
+  exit 1
+fi
+
+# Load and execute plugin
+PLUGIN_FILE="${ABUL_ROOT}/plugins/${PLUGIN_NAME}.sh"
+if [ ! -f "$PLUGIN_FILE" ]; then
+  abul::log::fatal "Plugin not found: ${PLUGIN_NAME} (expected: ${PLUGIN_FILE})"
+fi
+
+abul::log::info "Loading plugin: ${PLUGIN_NAME}"
+source "$PLUGIN_FILE"
+
+# Verify plugin implements required functions
+if ! declare -f "plugin::${PLUGIN_NAME}::run" >/dev/null 2>&1; then
+  abul::log::fatal "Plugin '${PLUGIN_NAME}' does not implement required function: plugin::${PLUGIN_NAME}::run"
+fi
+
+# Export configuration
+export ABUL_WORKSPACE
+export ABUL_BUILD_THREADS
+export ABUL_PLUGIN_NAME="$PLUGIN_NAME"
+
+# Initialize plugin workspace
+abul::common::init_plugin_workspace "$PLUGIN_NAME"
+
+# Execute plugin
+abul::log::info "Executing plugin: ${PLUGIN_NAME}"
+"plugin::${PLUGIN_NAME}::run" "${PLUGIN_ARGS[@]}"
+
+abul::log::success "Plugin '${PLUGIN_NAME}' completed successfully"

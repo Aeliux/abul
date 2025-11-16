@@ -1,0 +1,59 @@
+# ABUL Build System - Git Ignore
+
+# Workspace directories
+/workspace/
+abul-workspace/
+*-workspace/
+
+# Build artifacts
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+*.zip
+*.deb
+*.rpm
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Log files
+*.log
+build.log
+
+# Downloaded archives
+downloads/
+
+# Compiled sources
+src/
+staging/
+output/
+artifacts/
+
+# NDK (when downloaded)
+ndk/
+android-ndk-*/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+
+# Build markers (optional - uncomment to ignore)
+# .built/
